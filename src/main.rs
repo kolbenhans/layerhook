@@ -15,6 +15,16 @@ const LAYER_COUNT: u8 = 10;
 const PATTERN_FIELD_WIDTH: f32 = 440.0;
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
+// Whether the window is currently meant to be shown. While hidden, `ui()`
+// must not keep requesting repaints: a hidden/unmapped Wayland surface gets
+// no frame-done callbacks from the compositor, so a render loop that keeps
+// trying to present anyway can block waiting on a callback that will never
+// arrive — which is both what triggers Hyprland's "not responding" watchdog
+// and can wedge a thread badly enough to keep the whole process from
+// exiting cleanly (Quit doing nothing). Global since both the UI thread
+// (hide on close) and the tray's own thread (show/quit clicks) touch it.
+static WINDOW_VISIBLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
 // Hyprland doesn't honor xdg_toplevel's minimize request for toplevels, so
 // `ViewportCommand::Minimized` is a no-op there. The windowrule for the
 // "layerhook" class (Hyprland-only config, see hypr-user.lua) parks it on a
@@ -44,6 +54,7 @@ fn hyprctl_toggle_special_workspace(name: &str) {
 
 #[cfg(target_os = "linux")]
 fn show_window(ctx: &egui::Context) {
+    WINDOW_VISIBLE.store(true, std::sync::atomic::Ordering::Relaxed);
     if is_hyprland() {
         hyprctl_toggle_special_workspace("layerhook");
     } else {
@@ -55,6 +66,7 @@ fn show_window(ctx: &egui::Context) {
 
 #[cfg(target_os = "linux")]
 fn hide_window(ctx: &egui::Context) {
+    WINDOW_VISIBLE.store(false, std::sync::atomic::Ordering::Relaxed);
     if is_hyprland() {
         hyprctl_toggle_special_workspace("layerhook");
     } else {
@@ -64,6 +76,7 @@ fn hide_window(ctx: &egui::Context) {
 
 #[cfg(not(target_os = "linux"))]
 fn show_window(ctx: &egui::Context) {
+    WINDOW_VISIBLE.store(true, std::sync::atomic::Ordering::Relaxed);
     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
     ctx.request_repaint();
@@ -71,6 +84,7 @@ fn show_window(ctx: &egui::Context) {
 
 #[cfg(not(target_os = "linux"))]
 fn hide_window(ctx: &egui::Context) {
+    WINDOW_VISIBLE.store(false, std::sync::atomic::Ordering::Relaxed);
     ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
 }
 
@@ -234,7 +248,9 @@ fn layer_combo(ui: &mut egui::Ui, id_source: impl std::hash::Hash + std::fmt::De
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        ui.ctx().request_repaint_after(POLL_INTERVAL);
+        if WINDOW_VISIBLE.load(std::sync::atomic::Ordering::Relaxed) {
+            ui.ctx().request_repaint_after(POLL_INTERVAL);
+        }
 
         // Closing the window hides it instead of quitting — the matcher
         // thread keeps running in the background; the tray's "Quit" is the
