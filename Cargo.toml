@@ -1,0 +1,29 @@
+[package]
+name = "layerhook"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+description = "Switches a QMK/Vial keyboard's active layer based on the focused window's title."
+repository = "https://github.com/kolbenhans/layerhook"
+
+[dependencies]
+qmk-via-api = "0.9.0"
+hidapi = "2.6.7"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+directories = "5"
+eframe = "0.36.1"
+egui = "0.36.1"
+tray-icon = "0.24.2"
+image = "0.25"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }
+winreg = "0.52"

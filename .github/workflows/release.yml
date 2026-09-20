@@ -1,0 +1,67 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: {}
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libudev-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libx11-dev libxi-dev libxrandr-dev libxcursor-dev \
+            libssl-dev pkg-config \
+            libgtk-3-dev libglib2.0-dev libpango1.0-dev libatk1.0-dev \
+            libgdk-pixbuf-2.0-dev libcairo2-dev
+      - name: Build
+        run: cargo build --release --bin layerhook
+      - name: Package tarball
+        run: |
+          mkdir dist
+          cp target/release/layerhook README.md LICENSE dist/
+          tar -C dist -czf layerhook-linux-x86_64.tar.gz .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-release
+          path: layerhook-linux-x86_64.tar.gz
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: cargo build --release --bin layerhook
+      - name: Rename binary
+        run: move target/release/layerhook.exe layerhook-windows-x86_64.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-release
+          path: layerhook-windows-x86_64.exe
+
+  release:
+    needs: [linux, windows]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            linux-release/* windows-release/* \
+            --repo "${{ github.repository }}" \
+            --title "${{ github.ref_name }}" \
+            --prerelease \
+            --generate-notes
