@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=layerhook
+Comment=Switches a QMK/Vial keyboard's active layer based on the focused window's title
+Exec=layerhook
+Icon=icon
+Categories=Utility;
+Terminal=false
