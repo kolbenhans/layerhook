@@ -2,10 +2,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use layerhook::config::{AppConfig, DeviceRef, Rule};
-use layerhook::tray::Tray;
 use layerhook::{autostart, hid, tray, window};
 use qmk_via_api::scan::{scan_keyboards, KeyboardDeviceInfo};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 // BCORNE's keyColors keymap defines 10 dynamic layers (config.h
@@ -14,79 +13,6 @@ use std::time::Duration;
 const LAYER_COUNT: u8 = 10;
 const PATTERN_FIELD_WIDTH: f32 = 440.0;
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
-
-// Whether the window is currently meant to be shown. While hidden, `ui()`
-// must not keep requesting repaints: a hidden/unmapped Wayland surface gets
-// no frame-done callbacks from the compositor, so a render loop that keeps
-// trying to present anyway can block waiting on a callback that will never
-// arrive — which is both what triggers Hyprland's "not responding" watchdog
-// and can wedge a thread badly enough to keep the whole process from
-// exiting cleanly (Quit doing nothing). Global since both the UI thread
-// (hide on close) and the tray's own thread (show/quit clicks) touch it.
-static WINDOW_VISIBLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
-
-// Hyprland doesn't honor xdg_toplevel's minimize request for toplevels, so
-// `ViewportCommand::Minimized` is a no-op there. The windowrule for the
-// "layerhook" class (Hyprland-only config, see hypr-user.lua) parks it on a
-// dedicated special workspace instead; toggling that workspace is what
-// actually shows/hides the window there. On any other Linux desktop (KDE,
-// GNOME, COSMOS, ...) there's no such rule, so fall back to plain Minimized
-// — window-focus detection (window.rs) is Hyprland-only anyway, but hide/
-// show degrading gracefully instead of silently doing nothing is cheap.
-#[cfg(target_os = "linux")]
-fn is_hyprland() -> bool {
-    std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some()
-}
-
-// Stock Hyprland takes `hyprctl dispatch togglespecialworkspace <name>`
-// directly. Some builds (e.g. this machine's, via a Lua config layer) reject
-// that plain form and only accept a Lua dispatcher call instead — fall back
-// to that form if the plain one errors, so this keeps working on both.
-#[cfg(target_os = "linux")]
-fn hyprctl_toggle_special_workspace(name: &str) {
-    let plain = std::process::Command::new("hyprctl").args(["dispatch", "togglespecialworkspace", name]).output();
-    if matches!(&plain, Ok(o) if o.status.success()) {
-        return;
-    }
-    let expr = format!(r#"hl.dsp.workspace.toggle_special("{name}")"#);
-    let _ = std::process::Command::new("hyprctl").args(["dispatch", &expr]).spawn();
-}
-
-#[cfg(target_os = "linux")]
-fn show_window(ctx: &egui::Context) {
-    WINDOW_VISIBLE.store(true, std::sync::atomic::Ordering::Relaxed);
-    if is_hyprland() {
-        hyprctl_toggle_special_workspace("layerhook");
-    } else {
-        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-    }
-    ctx.request_repaint();
-}
-
-#[cfg(target_os = "linux")]
-fn hide_window(ctx: &egui::Context) {
-    WINDOW_VISIBLE.store(false, std::sync::atomic::Ordering::Relaxed);
-    if is_hyprland() {
-        hyprctl_toggle_special_workspace("layerhook");
-    } else {
-        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn show_window(ctx: &egui::Context) {
-    WINDOW_VISIBLE.store(true, std::sync::atomic::Ordering::Relaxed);
-    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-    ctx.request_repaint();
-}
-
-#[cfg(not(target_os = "linux"))]
-fn hide_window(ctx: &egui::Context) {
-    WINDOW_VISIBLE.store(false, std::sync::atomic::Ordering::Relaxed);
-    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-}
 
 struct Shared {
     rules: Vec<Rule>,
@@ -172,48 +98,37 @@ struct App {
     new_layer: u8,
     window_titles: Vec<String>,
     shared: Arc<Mutex<Shared>>,
-    _tray: Tray,
 }
 
 impl App {
-    fn new(ctx: &egui::Context) -> Self {
-        let cfg = AppConfig::load();
+    /// `shared` is created once in `main` and outlives every individual
+    /// window — the window itself gets destroyed on close and a fresh one
+    /// created on the next tray "Show" (see main()'s loop), so this re-reads
+    /// current state from `shared` and rescans devices each time, rather
+    /// than assuming a fresh launch.
+    fn new(shared: Arc<Mutex<Shared>>) -> Self {
         let devices = scan_keyboards().unwrap_or_default();
-
-        let tray = {
-            let ctx = ctx.clone();
-            tray::create_tray_icon(Arc::new(move || show_window(&ctx)))
+        let (rules, default_layer, current_device) = {
+            let s = shared.lock().unwrap();
+            (s.rules.clone(), s.default_layer, s.device.clone())
         };
 
-        let selected_device = cfg.device.as_ref().and_then(|d| {
+        let selected_device = current_device.as_ref().and_then(|d| {
             devices.iter().position(|dev| {
-                dev.vendor_id == d.vendor_id
-                    && dev.product_id == d.product_id
-                    && (d.serial_number.is_none() || dev.serial_number == d.serial_number)
+                dev.vendor_id == d.vendor_id && dev.product_id == d.product_id && dev.serial_number == d.serial_number
             })
         });
-
-        let shared = Arc::new(Mutex::new(Shared {
-            rules: cfg.rules.clone(),
-            default_layer: cfg.default_layer,
-            device: selected_device.and_then(|i| devices.get(i)).cloned(),
-            last_title: None,
-            last_layer_sent: None,
-            hid_error: None,
-        }));
-        spawn_matcher(shared.clone());
 
         App {
             devices,
             selected_device,
-            rules: cfg.rules,
-            default_layer: cfg.default_layer,
+            rules,
+            default_layer,
             autostart: autostart::is_enabled(),
             new_pattern: String::new(),
             new_layer: 0,
             window_titles: window::list_window_titles(),
             shared,
-            _tray: tray,
         }
     }
 
@@ -248,17 +163,12 @@ fn layer_combo(ui: &mut egui::Ui, id_source: impl std::hash::Hash + std::fmt::De
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        if WINDOW_VISIBLE.load(std::sync::atomic::Ordering::Relaxed) {
-            ui.ctx().request_repaint_after(POLL_INTERVAL);
-        }
+        ui.ctx().request_repaint_after(POLL_INTERVAL);
 
-        // Closing the window hides it instead of quitting — the matcher
-        // thread keeps running in the background; the tray's "Quit" is the
-        // actual exit.
-        if ui.ctx().input(|i| i.viewport().close_requested()) {
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            hide_window(ui.ctx());
-        }
+        // Closing the window really closes it (destroys this viewport) —
+        // main()'s loop then waits for the next tray "Show" and builds a
+        // fresh one. The matcher thread isn't tied to this window at all,
+        // so layer-switching keeps running the whole time regardless.
 
         let section_title = |ui: &mut egui::Ui, text: &str| {
             ui.label(egui::RichText::new(text).strong().size(14.0));
@@ -392,10 +302,57 @@ fn app_icon() -> egui::IconData {
     egui::IconData { rgba: icon.into_raw(), width, height }
 }
 
-fn main() -> eframe::Result<()> {
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([840.0, 520.0]).with_icon(app_icon()),
-        ..Default::default()
+fn main() {
+    let cfg = AppConfig::load();
+    let devices = scan_keyboards().unwrap_or_default();
+    let selected_device = cfg.device.as_ref().and_then(|d| {
+        devices.iter().position(|dev| {
+            dev.vendor_id == d.vendor_id && dev.product_id == d.product_id && (d.serial_number.is_none() || dev.serial_number == d.serial_number)
+        })
+    });
+    let shared = Arc::new(Mutex::new(Shared {
+        rules: cfg.rules,
+        default_layer: cfg.default_layer,
+        device: selected_device.and_then(|i| devices.get(i)).cloned(),
+        last_title: None,
+        last_layer_sent: None,
+        hid_error: None,
+    }));
+    spawn_matcher(shared.clone());
+
+    // Tray-driven show/hide used to fight the Wayland compositor (resizing
+    // or unmapping an existing surface, both of which this Hyprland build
+    // handled badly — see git history). Actually closing and recreating the
+    // window sidesteps all of that: on close the viewport is genuinely
+    // destroyed, and this loop just waits for the next tray "Show" to build
+    // a new one. The tray and the matcher thread above are not tied to any
+    // particular window, so they keep running across every close/reopen.
+    let show_requested = Arc::new((Mutex::new(true), Condvar::new()));
+    let _tray = {
+        let show_requested = show_requested.clone();
+        tray::create_tray_icon(Arc::new(move || {
+            let (lock, cvar) = &*show_requested;
+            *lock.lock().unwrap() = true;
+            cvar.notify_one();
+        }))
     };
-    eframe::run_native("layerhook", options, Box::new(|cc| Ok(Box::new(App::new(&cc.egui_ctx)))))
+
+    let icon = Arc::new(app_icon());
+    loop {
+        {
+            let (lock, cvar) = &*show_requested;
+            let mut requested = lock.lock().unwrap();
+            while !*requested {
+                requested = cvar.wait(requested).unwrap();
+            }
+            *requested = false;
+        }
+
+        let options = eframe::NativeOptions {
+            viewport: egui::ViewportBuilder::default().with_inner_size([840.0, 520.0]).with_icon(icon.clone()),
+            ..Default::default()
+        };
+        let shared = shared.clone();
+        let _ = eframe::run_native("layerhook", options, Box::new(move |_cc| Ok(Box::new(App::new(shared)))));
+    }
 }
