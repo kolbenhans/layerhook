@@ -21,6 +21,10 @@ pub struct AppConfig {
     /// Layer to fall back to when the focused window matches no rule.
     #[serde(default)]
     pub default_layer: u8,
+    /// Skip showing the main window on launch. Only applied when autostart
+    /// is also enabled — a manual launch should always show the window.
+    #[serde(default)]
+    pub start_minimized: bool,
 }
 
 fn config_path() -> Option<PathBuf> {

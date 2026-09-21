@@ -94,6 +94,7 @@ struct App {
     rules: Vec<Rule>,
     default_layer: u8,
     autostart: bool,
+    start_minimized: bool,
     new_pattern: String,
     new_layer: u8,
     window_titles: Vec<String>,
@@ -125,6 +126,7 @@ impl App {
             rules,
             default_layer,
             autostart: autostart::is_enabled(),
+            start_minimized: AppConfig::load().start_minimized,
             new_pattern: String::new(),
             new_layer: 0,
             window_titles: window::list_window_titles(),
@@ -138,7 +140,7 @@ impl App {
             product_id: d.product_id,
             serial_number: d.serial_number.clone(),
         });
-        AppConfig { rules: self.rules.clone(), device, default_layer: self.default_layer }.save();
+        AppConfig { rules: self.rules.clone(), device, default_layer: self.default_layer, start_minimized: self.start_minimized }.save();
     }
 
     fn sync_shared(&self) {
@@ -181,6 +183,11 @@ impl eframe::App for App {
             ui.horizontal(|ui| {
                 ui.heading("layerhook");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_enabled_ui(self.autostart, |ui| {
+                        if ui.checkbox(&mut self.start_minimized, "Start minimized").changed() {
+                            self.persist();
+                        }
+                    });
                     if ui.checkbox(&mut self.autostart, "Start automatically (login)").changed() {
                         autostart::set_enabled(self.autostart);
                     }
@@ -327,7 +334,12 @@ fn main() {
     // destroyed, and this loop just waits for the next tray "Show" to build
     // a new one. The tray and the matcher thread above are not tied to any
     // particular window, so they keep running across every close/reopen.
-    let show_requested = Arc::new((Mutex::new(true), Condvar::new()));
+    //
+    // "Start minimized" only skips this very first show — it only makes
+    // sense paired with autostart, since a manual launch should always show
+    // the window, so it's ignored if autostart isn't actually enabled.
+    let show_on_launch = !(cfg.start_minimized && autostart::is_enabled());
+    let show_requested = Arc::new((Mutex::new(show_on_launch), Condvar::new()));
     let _tray = {
         let show_requested = show_requested.clone();
         tray::create_tray_icon(Arc::new(move || {
