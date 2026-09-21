@@ -4,7 +4,7 @@ Switches your QMK/Vial keyboard's active layer automatically based on which
 window is focused — regex rules map a window title to a layer, with a
 fallback default layer for everything else.
 
-<img width="600" alt="layerhook" src="resources/icon-256.png" />
+<img width="500" height="500" alt="code-snippet" src="https://github.com/user-attachments/assets/40a8919a-3197-417e-acb5-ec6eee84bb3d" />
 
 ## How it works
 
