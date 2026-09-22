@@ -12,6 +12,8 @@ use std::time::Duration;
 // query it — fine for this one board, revisit if layerhook ever targets more.
 const LAYER_COUNT: u8 = 10;
 const PATTERN_FIELD_WIDTH: f32 = 440.0;
+const LAYER_COMBO_WIDTH: f32 = 110.0;
+const ROW_BUTTON_WIDTH: f32 = 80.0;
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 struct Shared {
@@ -153,14 +155,25 @@ impl App {
 
 fn layer_combo(ui: &mut egui::Ui, id_source: impl std::hash::Hash + std::fmt::Debug, layer: &mut u8) -> bool {
     let mut changed = false;
-    egui::ComboBox::from_id_salt(id_source).selected_text(format!("Layer {layer}")).show_ui(ui, |ui| {
-        for l in 0..LAYER_COUNT {
-            if ui.selectable_value(layer, l, format!("Layer {l}")).clicked() {
-                changed = true;
+    egui::ComboBox::from_id_salt(id_source)
+        .selected_text(format!("Layer {layer}"))
+        .width(LAYER_COMBO_WIDTH)
+        .show_ui(ui, |ui| {
+            for l in 0..LAYER_COUNT {
+                if ui.selectable_value(layer, l, format!("Layer {l}")).clicked() {
+                    changed = true;
+                }
             }
-        }
-    });
+        });
     changed
+}
+
+fn weak(text: &str, size: f32) -> egui::RichText {
+    egui::RichText::new(text).weak().size(size)
+}
+
+fn strong(text: &str, size: f32) -> egui::RichText {
+    egui::RichText::new(text).strong().size(size)
 }
 
 impl eframe::App for App {
@@ -172,133 +185,411 @@ impl eframe::App for App {
         // fresh one. The matcher thread isn't tied to this window at all,
         // so layer-switching keeps running the whole time regardless.
 
-        let section_title = |ui: &mut egui::Ui, text: &str| {
-            ui.label(egui::RichText::new(text).strong().size(14.0));
-            ui.add_space(6.0);
+        let section_header = |ui: &mut egui::Ui, title: &str, description: Option<&str>| {
+            ui.horizontal(|ui| {
+                ui.label(strong(title, 15.0));
+
+                if let Some(description) = description {
+                    ui.add_space(4.0);
+                    ui.label(weak(description, 12.0));
+                }
+            });
+
+            ui.add_space(8.0);
         };
 
         egui::CentralPanel::default().show(ui, |ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(8.0, 10.0);
+            ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+
+            // ─────────────────────────────────────────────────────────────
+            // Header
+            // ─────────────────────────────────────────────────────────────
 
             ui.horizontal(|ui| {
-                ui.heading("layerhook");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.add_enabled_ui(self.autostart, |ui| {
-                        if ui.checkbox(&mut self.start_minimized, "Start minimized").changed() {
+                ui.vertical(|ui| {
+                    ui.heading("layerhook");
+                    ui.label(weak("Automatic QMK layer switching", 12.0));
+                });
+
+                ui.with_layout(
+                    egui::Layout::right_to_left(egui::Align::Center),
+                    |ui| {
+                        ui.add_enabled_ui(self.autostart, |ui| {
+                            if ui
+                                .checkbox(&mut self.start_minimized, "Start minimized")
+                                .changed()
+                            {
+                                self.persist();
+                            }
+                        });
+
+                        if ui
+                            .checkbox(
+                                &mut self.autostart,
+                                "Start automatically",
+                            )
+                            .changed()
+                        {
+                            autostart::set_enabled(self.autostart);
                             self.persist();
                         }
-                    });
-                    if ui.checkbox(&mut self.autostart, "Start automatically (login)").changed() {
-                        autostart::set_enabled(self.autostart);
-                    }
-                });
+                    },
+                );
             });
+
+            ui.add_space(6.0);
+            ui.separator();
             ui.add_space(4.0);
+
+            // ─────────────────────────────────────────────────────────────
+            // Keyboard
+            // ─────────────────────────────────────────────────────────────
 
             egui::Frame::group(ui.style()).show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                section_title(ui, "Keyboard");
+
+                section_header(
+                    ui,
+                    "Keyboard",
+                    Some("Select the QMK keyboard layerhook should control"),
+                );
+
+                let selected_text = self
+                    .selected_device
+                    .and_then(|i| self.devices.get(i))
+                    .map(|d| {
+                        format!(
+                            "{} ({:04X}:{:04X})",
+                            d.product.clone().unwrap_or_default(),
+                            d.vendor_id,
+                            d.product_id
+                        )
+                    })
+                    .unwrap_or_else(|| "No keyboard selected".to_string());
+
                 ui.horizontal(|ui| {
-                    let selected_text = self
-                        .selected_device
-                        .and_then(|i| self.devices.get(i))
-                        .map(|d| format!("{} ({:04X}:{:04X})", d.product.clone().unwrap_or_default(), d.vendor_id, d.product_id))
-                        .unwrap_or_else(|| "(none selected)".to_string());
-                    egui::ComboBox::from_id_salt("device").selected_text(selected_text).show_ui(ui, |ui| {
-                        for i in 0..self.devices.len() {
-                            let d = &self.devices[i];
-                            let label = format!("{} ({:04X}:{:04X})", d.product.clone().unwrap_or_default(), d.vendor_id, d.product_id);
-                            if ui.selectable_label(self.selected_device == Some(i), label).clicked() {
-                                self.selected_device = Some(i);
-                                self.sync_shared();
-                                self.persist();
-                            }
-                        }
+                    let mut rescan_clicked = false;
+
+                    // Right-to-left: the button is placed flush against the
+                    // row's right edge first, then the combo fills whatever
+                    // width is left — same right margin on every row in this
+                    // frame, regardless of each widget's natural size.
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        rescan_clicked = ui.add(egui::Button::new("Rescan").min_size(egui::vec2(ROW_BUTTON_WIDTH, 0.0))).clicked();
+
+                        let combo_width = ui.available_width().max(180.0);
+                        egui::ComboBox::from_id_salt("device")
+                            .selected_text(selected_text)
+                            .width(combo_width)
+                            .show_ui(ui, |ui| {
+                                if self.devices.is_empty() {
+                                    ui.weak("No compatible keyboards found.");
+                                }
+
+                                for i in 0..self.devices.len() {
+                                    let d = &self.devices[i];
+
+                                    let label = format!(
+                                        "{} ({:04X}:{:04X})",
+                                        d.product.clone().unwrap_or_default(),
+                                        d.vendor_id,
+                                        d.product_id
+                                    );
+
+                                    if ui
+                                        .selectable_label(
+                                            self.selected_device == Some(i),
+                                            label,
+                                        )
+                                        .clicked()
+                                    {
+                                        self.selected_device = Some(i);
+                                        self.sync_shared();
+                                        self.persist();
+                                    }
+                                }
+                            });
                     });
-                    if ui.button("Rescan").clicked() {
+
+                    if rescan_clicked {
                         self.devices = scan_keyboards().unwrap_or_default();
                         self.selected_device = None;
                         self.sync_shared();
                     }
                 });
+
+                if self.devices.is_empty() {
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(
+                            "Connect your keyboard and press Rescan.",
+                        )
+                        .weak()
+                        .italics(),
+                    );
+                }
             });
+
+            ui.add_space(4.0);
+
+            // ─────────────────────────────────────────────────────────────
+            // Add rule
+            // ─────────────────────────────────────────────────────────────
 
             egui::Frame::group(ui.style()).show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                section_title(ui, "Add rule");
+
+                section_header(
+                    ui,
+                    "Add rule",
+                    Some("Match the active window title with a regular expression"),
+                );
 
                 ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut self.new_pattern).hint_text("Regex, e.g. .*vscod.*|.*gedit.*").desired_width(PATTERN_FIELD_WIDTH));
-                    layer_combo(ui, "new_layer", &mut self.new_layer);
-                    if ui.add_enabled(!self.new_pattern.is_empty(), egui::Button::new("+ Add")).clicked() {
-                        self.rules.push(Rule { pattern: std::mem::take(&mut self.new_pattern), layer: self.new_layer });
+                    let mut add_clicked = false;
+
+                    // Right-to-left: Add button and layer combo (both fixed
+                    // width) land flush against the row's right edge, the
+                    // pattern field fills whatever's left — same right
+                    // margin as every other row in this frame.
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        add_clicked = ui
+                            .add_enabled(!self.new_pattern.is_empty(), egui::Button::new("+ Add").min_size(egui::vec2(ROW_BUTTON_WIDTH, 0.0)))
+                            .clicked();
+
+                        layer_combo(ui, "new_layer", &mut self.new_layer);
+
+                        let pattern_width = ui.available_width().max(120.0);
+                        ui.add_sized(
+                            [pattern_width, 30.0],
+                            egui::TextEdit::singleline(&mut self.new_pattern)
+                                .hint_text("Regex, e.g. .*vscod.*|.*gedit.*"),
+                        );
+                    });
+
+                    if add_clicked {
+                        self.rules.push(Rule {
+                            pattern: std::mem::take(&mut self.new_pattern),
+                            layer: self.new_layer,
+                        });
+
                         self.sync_shared();
                         self.persist();
                     }
                 });
 
                 ui.add_space(6.0);
+
                 ui.horizontal(|ui| {
-                    ui.label("Pick from an open window:");
+                    ui.label(weak("Open window", 12.0));
+
+                    let mut refresh_clicked = false;
                     let mut picked: Option<String> = None;
-                    egui::ComboBox::from_id_salt("open_windows").selected_text("Select window...").show_ui(ui, |ui| {
-                        for title in &self.window_titles {
-                            if ui.selectable_label(false, title).clicked() {
-                                picked = Some(title.clone());
-                            }
-                        }
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        refresh_clicked = ui.add(egui::Button::new("Refresh").min_size(egui::vec2(ROW_BUTTON_WIDTH, 0.0))).clicked();
+
+                        let combo_width = ui.available_width().max(160.0);
+                        egui::ComboBox::from_id_salt("open_windows")
+                            .selected_text("Select a window...")
+                            .width(combo_width)
+                            .show_ui(ui, |ui| {
+                                if self.window_titles.is_empty() {
+                                    ui.weak("No windows available.");
+                                }
+
+                                for title in &self.window_titles {
+                                    if ui
+                                        .selectable_label(false, title)
+                                        .clicked()
+                                    {
+                                        picked = Some(title.clone());
+                                    }
+                                }
+                            });
                     });
+
                     if let Some(title) = picked {
                         self.new_pattern = regex::escape(&title);
                     }
-                    if ui.button("Refresh").clicked() {
+
+                    if refresh_clicked {
                         self.window_titles = window::list_window_titles();
                     }
                 });
+
+                ui.add_space(4.0);
+
+                ui.label(weak("Tip: Use negative lookaheads to exclude applications or browsers.", 11.0));
             });
+
+            ui.add_space(4.0);
+
+            // ─────────────────────────────────────────────────────────────
+            // Rules
+            // ─────────────────────────────────────────────────────────────
 
             egui::Frame::group(ui.style()).show(ui, |ui| {
                 ui.set_width(ui.available_width());
+
                 ui.horizontal(|ui| {
-                    section_title(ui, "Rules");
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        layer_combo(ui, "default_layer", &mut self.default_layer);
-                        ui.label("Default layer (no rule matches):");
+                    ui.vertical(|ui| {
+                        ui.label(strong("Rules", 15.0));
+                        ui.label(weak("Rules are evaluated against the active window title", 12.0));
                     });
+
+                    ui.with_layout(
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            layer_combo(
+                                ui,
+                                "default_layer",
+                                &mut self.default_layer,
+                            );
+
+                            ui.label(weak("Default layer", 12.0));
+                        },
+                    );
                 });
-                ui.add_space(2.0);
+
+                ui.add_space(10.0);
 
                 let mut removed: Option<usize> = None;
-                for (i, rule) in self.rules.iter_mut().enumerate() {
+                let mut changed = false;
+
+                if self.rules.is_empty() {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(8.0);
+
+                        ui.label(
+                            egui::RichText::new("No rules configured")
+                                .strong(),
+                        );
+
+                        ui.label(
+                            egui::RichText::new(
+                                "Add a rule above to automatically switch layers.",
+                            )
+                            .weak(),
+                        );
+
+                        ui.add_space(8.0);
+                    });
+                } else {
+                    // Column labels
                     ui.horizontal(|ui| {
-                        ui.add(egui::TextEdit::singleline(&mut rule.pattern).desired_width(PATTERN_FIELD_WIDTH));
-                        layer_combo(ui, ("layer", i), &mut rule.layer);
-                        if ui.button("Remove").clicked() {
-                            removed = Some(i);
+                        ui.add_sized([PATTERN_FIELD_WIDTH, 18.0], egui::Label::new(weak("Pattern", 11.0)));
+                        ui.add_sized([LAYER_COMBO_WIDTH, 18.0], egui::Label::new(weak("Layer", 11.0)));
+                        ui.add_space(8.0);
+                        ui.label(weak("Action", 11.0));
+                    });
+
+                    ui.add_space(2.0);
+
+                    // Capped so a long rule list scrolls instead of pushing
+                    // the Status section off the (fixed-height) window.
+                    egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+                        for (i, rule) in self.rules.iter_mut().enumerate() {
+                            egui::Frame::new()
+                                .fill(ui.visuals().faint_bg_color)
+                                .inner_margin(egui::Margin::symmetric(8, 5))
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        if ui
+                                            .add_sized(
+                                                [PATTERN_FIELD_WIDTH, 28.0],
+                                                egui::TextEdit::singleline(
+                                                    &mut rule.pattern,
+                                                ),
+                                            )
+                                            .changed()
+                                        {
+                                            changed = true;
+                                        }
+
+                                        if layer_combo(
+                                            ui,
+                                            ("layer", i),
+                                            &mut rule.layer,
+                                        ) {
+                                            changed = true;
+                                        }
+
+                                        if ui.button("Remove").clicked() {
+                                            removed = Some(i);
+                                        }
+                                    });
+                                });
+
+                            ui.add_space(3.0);
                         }
                     });
                 }
-                if self.rules.is_empty() {
-                    ui.weak("No rules yet — add one above.");
-                }
-                // Catches in-place edits (pattern text, layer dropdown) that
-                // have no dedicated click handler of their own.
-                self.sync_shared();
-                self.persist();
+
                 if let Some(i) = removed {
                     self.rules.remove(i);
+                    changed = true;
+                }
+
+                if changed {
                     self.sync_shared();
                     self.persist();
                 }
             });
 
-            ui.add_space(2.0);
+            ui.add_space(4.0);
+
+            // ─────────────────────────────────────────────────────────────
+            // Status
+            // ─────────────────────────────────────────────────────────────
+
             let s = self.shared.lock().unwrap();
-            ui.label(format!("Active window: {}", s.last_title.as_deref().unwrap_or("-")));
-            ui.label(format!("Last sent layer: {}", s.last_layer_sent.map(|l| l.to_string()).unwrap_or_else(|| "-".to_string())));
-            if let Some(err) = &s.hid_error {
-                ui.colored_label(egui::Color32::from_rgb(200, 60, 60), format!("HID error: {err}"));
-            }
+
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+
+                ui.horizontal(|ui| {
+                    ui.label(strong("Status", 13.0));
+
+                    ui.with_layout(
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            if s.hid_error.is_some() {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(200, 60, 60),
+                                    "● HID error",
+                                );
+                            } else {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(80, 170, 100),
+                                    "● Connected",
+                                );
+                            }
+                        },
+                    );
+                });
+
+                ui.add_space(6.0);
+
+                ui.horizontal(|ui| {
+                    ui.label(weak("Active window:", 12.0));
+                    ui.label(s.last_title.as_deref().unwrap_or("-"));
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label(weak("Last sent layer:", 12.0));
+                    ui.label(s.last_layer_sent.map(|l| l.to_string()).unwrap_or_else(|| "-".to_string()));
+                });
+
+                if let Some(err) = &s.hid_error {
+                    ui.add_space(4.0);
+
+                    ui.colored_label(
+                        egui::Color32::from_rgb(200, 60, 60),
+                        format!("HID error: {err}"),
+                    );
+                }
+            });
         });
     }
 }
@@ -361,7 +652,7 @@ fn main() {
         }
 
         let options = eframe::NativeOptions {
-            viewport: egui::ViewportBuilder::default().with_inner_size([840.0, 520.0]).with_icon(icon.clone()),
+            viewport: egui::ViewportBuilder::default().with_inner_size([840.0, 620.0]).with_icon(icon.clone()),
             ..Default::default()
         };
         let shared = shared.clone();
