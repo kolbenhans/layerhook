@@ -15,6 +15,15 @@ const PATTERN_FIELD_WIDTH: f32 = 440.0;
 const LAYER_COMBO_WIDTH: f32 = 110.0;
 const ROW_BUTTON_WIDTH: f32 = 80.0;
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
+// Separate from POLL_INTERVAL on purpose: this only governs how often the idle
+// GUI redraws itself (each redraw forces an OpenGL buffer swap even when
+// nothing changed). Under GPU contention (e.g. a game) that swap can block
+// long enough to miss the compositor's Wayland ping, marking the window
+// "not responding" - unrelated apps that render nothing while idle don't
+// have this problem since they never touch the GPU. The matcher thread's own
+// polling (layer-switching responsiveness) is unaffected, it runs on
+// POLL_INTERVAL regardless of this.
+const GUI_REPAINT_INTERVAL: Duration = Duration::from_secs(2);
 
 struct Shared {
     rules: Vec<Rule>,
@@ -25,16 +34,16 @@ struct Shared {
     hid_error: Option<String>,
 }
 
+fn pattern_matches(pattern: &str, title: &str) -> bool {
+    // fancy_regex, not the plain `regex` crate: rules commonly use lookarounds
+    // (e.g. `(?!...)` to exclude a title) which `regex` refuses to compile at
+    // all - that failure used to be swallowed as "no match", so an excluding
+    // rule silently fell back to the default layer instead of ever matching.
+    fancy_regex::Regex::new(&format!("(?i){pattern}")).is_ok_and(|re| re.is_match(title).unwrap_or(false))
+}
+
 fn resolve_layer(rules: &[Rule], title: &str) -> Option<u8> {
-    rules
-        .iter()
-        .find(|r| {
-            regex::RegexBuilder::new(&r.pattern)
-                .case_insensitive(true)
-                .build()
-                .is_ok_and(|re| re.is_match(title))
-        })
-        .map(|r| r.layer)
+    rules.iter().find(|r| pattern_matches(&r.pattern, title)).map(|r| r.layer)
 }
 
 fn open_device(api: &hidapi::HidApi, dev: &KeyboardDeviceInfo) -> Option<hidapi::HidDevice> {
@@ -45,12 +54,27 @@ fn open_device(api: &hidapi::HidApi, dev: &KeyboardDeviceInfo) -> Option<hidapi:
 }
 
 fn spawn_matcher(shared: Arc<Mutex<Shared>>) {
+    // window::watch() pushes a title update the instant focus changes
+    // instead of us polling for it - instant layer switches, and this thread
+    // sits at zero CPU between events instead of waking every POLL_INTERVAL
+    // just to ask "did anything change?". recv_timeout still retries on
+    // POLL_INTERVAL even without a fresh event, so a failed HID write (e.g.
+    // keyboard briefly unplugged) keeps getting retried rather than only on
+    // the next focus change.
+    let (tx, rx) = std::sync::mpsc::channel::<Option<String>>();
+    window::watch(tx);
+
     std::thread::spawn(move || {
         let Ok(api) = hidapi::HidApi::new() else { return };
+        let mut last_title: Option<String> = None;
         loop {
-            std::thread::sleep(POLL_INTERVAL);
+            match rx.recv_timeout(POLL_INTERVAL) {
+                Ok(title) => last_title = title,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+            }
+            let title = last_title.clone();
 
-            let title = window::active_window_title();
             let (rules, default_layer, device, last_layer_sent) = {
                 let s = shared.lock().unwrap();
                 (s.rules.clone(), s.default_layer, s.device.clone(), s.last_layer_sent)
@@ -178,7 +202,7 @@ fn strong(text: &str, size: f32) -> egui::RichText {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        ui.ctx().request_repaint_after(POLL_INTERVAL);
+        ui.ctx().request_repaint_after(GUI_REPAINT_INTERVAL);
 
         // Closing the window really closes it (destroys this viewport) —
         // main()'s loop then waits for the next tray "Show" and builds a
@@ -490,21 +514,24 @@ impl eframe::App for App {
                     // the Status section off the (fixed-height) window.
                     egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
                         for (i, rule) in self.rules.iter_mut().enumerate() {
+                            let regex_error = fancy_regex::Regex::new(&format!("(?i){}", rule.pattern)).err();
+
                             egui::Frame::new()
-                                .fill(ui.visuals().faint_bg_color)
+                                .fill(if regex_error.is_some() {
+                                    egui::Color32::from_rgb(64, 24, 24)
+                                } else {
+                                    ui.visuals().faint_bg_color
+                                })
                                 .inner_margin(egui::Margin::symmetric(8, 5))
                                 .show(ui, |ui| {
                                     ui.horizontal(|ui| {
-                                        if ui
-                                            .add_sized(
-                                                [PATTERN_FIELD_WIDTH, 28.0],
-                                                egui::TextEdit::singleline(
-                                                    &mut rule.pattern,
-                                                ),
-                                            )
-                                            .changed()
-                                        {
-                                            changed = true;
+                                        let pattern_field = ui.add_sized(
+                                            [PATTERN_FIELD_WIDTH, 28.0],
+                                            egui::TextEdit::singleline(&mut rule.pattern),
+                                        );
+                                        changed |= pattern_field.changed();
+                                        if let Some(err) = &regex_error {
+                                            let _ = pattern_field.on_hover_text(format!("Invalid regex: {err}"));
                                         }
 
                                         if layer_combo(

@@ -1,6 +1,6 @@
-//! Active window title + list of open window titles, per platform.
-//! Linux backend is Hyprland-specific (shells out to hyprctl) — matches this
-//! project's actual target environment, not a generic X11/Wayland solution.
+//! Active window title tracking, per platform. `watch()` is push-based
+//! (spawns whatever the platform needs, sends a title update whenever focus
+//! changes) rather than polled - see the platform modules for why.
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -8,6 +8,6 @@ mod linux;
 mod windows;
 
 #[cfg(target_os = "linux")]
-pub use linux::{active_window_title, list_window_titles};
+pub use linux::{list_window_titles, watch};
 #[cfg(target_os = "windows")]
-pub use windows::{active_window_title, list_window_titles};
+pub use windows::{list_window_titles, watch};
