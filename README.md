@@ -12,7 +12,7 @@ A background thread polls the focused window's title every 500ms, matches it
 against your rules (first match wins), and sends the target layer to the
 keyboard over raw HID. No match → falls back to the configured default layer.
 
-- **Linux**: window detection via `hyprctl` — **Hyprland only** for now.
+- **Linux**: event-driven window detection, per desktop — Hyprland/Sway/River (`wlr-foreign-toplevel-management`), COSMIC (`cosmic-toplevel-info` + `ext-foreign-toplevel-list`), KDE Plasma (`plasma-window-management`), or any EWMH X11 session (`_NET_ACTIVE_WINDOW`). GNOME/Mutter isn't supported — no protocol exposes this without a Shell extension.
 - **Windows**: window detection via Win32 (`GetForegroundWindow`/`EnumWindows`) — works on any window manager.
 - Runs in the system tray; closing the window hides it instead of quitting.
 - Optional autostart on login (Linux: XDG autostart entry; Windows: `HKCU...\Run`).

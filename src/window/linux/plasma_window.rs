@@ -3,8 +3,7 @@
 //! wlr-foreign-toplevel-management - Hyprland/Sway/River are tried first and
 //! don't advertise this one). Push-based, same shape as [`super::wlr_toplevel`].
 //!
-//! Untested against a real KWin session - built from the protocol XML in
-//! `wayland-protocols-plasma`, not verified end-to-end like the wlr backend.
+//! Verified live against a real KWin session (protocol v20).
 
 use std::collections::HashMap;
 use std::sync::mpsc::Sender;
@@ -52,11 +51,24 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for State {
 
 impl Dispatch<OrgKdePlasmaWindowManagement, ()> for State {
     fn event(state: &mut Self, mgr: &OrgKdePlasmaWindowManagement, event: org_kde_plasma_window_management::Event, _: &(), _: &Connection, qh: &QueueHandle<Self>) {
-        // "window" only gives an internal id (not a new_id) - get_window()
-        // is a separate request that actually creates the proxy.
-        if let org_kde_plasma_window_management::Event::Window { id } = event {
-            let handle = mgr.get_window(id, qh, ());
-            state.windows.insert(handle, Win::default());
+        use org_kde_plasma_window_management::Event;
+        // Neither event carries a new_id - get_window()/get_window_by_uuid()
+        // are separate requests that actually create the proxy.
+        //
+        // `window` is the legacy (pre-v13) id-based variant; current KWin
+        // (verified live against v20) only ever sends `window_with_uuid`
+        // and never sends `window` at all, so both are handled - the id
+        // path for older servers, uuid for anything since v13.
+        match event {
+            Event::Window { id } => {
+                let handle = mgr.get_window(id, qh, ());
+                state.windows.insert(handle, Win::default());
+            }
+            Event::WindowWithUuid { uuid, .. } => {
+                let handle = mgr.get_window_by_uuid(uuid, qh, ());
+                state.windows.insert(handle, Win::default());
+            }
+            _ => {}
         }
     }
 }
