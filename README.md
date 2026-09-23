@@ -46,7 +46,13 @@ commands added to the keyboard's own firmware (family `0x02`):
 - `0xB0` **SET_LAYER**: `[0x02, 0xB0, layer]` → `layer_move(layer)`, replies with `[0x02, 0xB0, layer]` once applied.
 - `0xB1` **GET_LAYER**: `[0x02, 0xB1]` → replies `[0x02, 0xB1, current_layer]`.
 
-Reference implementation (BCORNE, `keyColors` keymap):
+Easiest path: the [`layerhook` QMK community module](https://github.com/kolbenhans/qmk-modules#layerhook)
+implements both commands standalone — add it to your keymap's `keymap.json`
+and you're done, no hand-written `case` needed. It also chains automatically
+if the keymap also uses the `key_colors`/`audio_visualizer` modules from the
+same repo.
+
+Reference implementation without the module (BCORNE, `keyColors` keymap):
 [`key_colors_hid.c`](https://github.com/kolbenhans/BCORNE/blob/main/m57_bcorne/keymaps/keyColors/key_colors_hid.c#L155-L179)
 — add an equivalent `case` to your own keyboard's `raw_hid_receive_kb` to use
 layerhook with it.
