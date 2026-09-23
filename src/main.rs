@@ -125,6 +125,7 @@ struct App {
     new_layer: u8,
     window_titles: Vec<String>,
     shared: Arc<Mutex<Shared>>,
+    icon_texture: egui::TextureHandle,
 }
 
 impl App {
@@ -133,7 +134,7 @@ impl App {
     /// created on the next tray "Show" (see main()'s loop), so this re-reads
     /// current state from `shared` and rescans devices each time, rather
     /// than assuming a fresh launch.
-    fn new(shared: Arc<Mutex<Shared>>) -> Self {
+    fn new(shared: Arc<Mutex<Shared>>, ctx: &egui::Context) -> Self {
         let devices = scan_keyboards().unwrap_or_default();
         let (rules, default_layer, current_device) = {
             let s = shared.lock().unwrap();
@@ -157,6 +158,7 @@ impl App {
             new_layer: 0,
             window_titles: window::list_window_titles(),
             shared,
+            icon_texture: load_icon_texture(ctx),
         }
     }
 
@@ -230,6 +232,7 @@ impl eframe::App for App {
             // ─────────────────────────────────────────────────────────────
 
             ui.horizontal(|ui| {
+                ui.add(egui::Image::from_texture(&self.icon_texture).max_size(egui::vec2(32.0, 32.0)));
                 ui.vertical(|ui| {
                     ui.heading("layerhook");
                     ui.label(weak("Automatic QMK layer switching", 12.0));
@@ -627,6 +630,15 @@ fn app_icon() -> egui::IconData {
     egui::IconData { rgba: icon.into_raw(), width, height }
 }
 
+// Same PNG as the window/tray icon, just as a texture for the in-GUI header
+// instead of an egui::IconData for the OS-level window icon.
+fn load_icon_texture(ctx: &egui::Context) -> egui::TextureHandle {
+    let icon = image::load_from_memory(include_bytes!("../resources/icon-256.png")).expect("failed to load app icon").into_rgba8();
+    let (width, height) = icon.dimensions();
+    let color_image = egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &icon.into_raw());
+    ctx.load_texture("app-icon", color_image, egui::TextureOptions::LINEAR)
+}
+
 fn main() {
     let cfg = AppConfig::load();
     let devices = scan_keyboards().unwrap_or_default();
@@ -683,6 +695,6 @@ fn main() {
             ..Default::default()
         };
         let shared = shared.clone();
-        let _ = eframe::run_native("layerhook", options, Box::new(move |_cc| Ok(Box::new(App::new(shared)))));
+        let _ = eframe::run_native("layerhook", options, Box::new(move |cc| Ok(Box::new(App::new(shared, &cc.egui_ctx)))));
     }
 }
