@@ -8,14 +8,35 @@ fallback default layer for everything else.
 
 ## How it works
 
-A background thread polls the focused window's title every 500ms, matches it
-against your rules (first match wins), and sends the target layer to the
-keyboard over raw HID. No match → falls back to the configured default layer.
+A background thread watches for window-focus changes (event-driven — pushed
+by the OS/compositor the instant focus changes, not polled), matches the new
+title against your rules (first match wins), and sends the target layer to
+the keyboard over raw HID. No match → falls back to the configured default
+layer. A periodic recheck every 500ms still runs alongside this purely as a
+retry (e.g. the keyboard was briefly unplugged) — it doesn't drive normal
+layer switching, which reacts immediately.
 
-- **Linux**: event-driven window detection, per desktop — Hyprland/Sway/River (`wlr-foreign-toplevel-management`), COSMIC (`cosmic-toplevel-info` + `ext-foreign-toplevel-list`), KDE Plasma (`plasma-window-management`), or any EWMH X11 session (`_NET_ACTIVE_WINDOW`). GNOME/Mutter isn't supported — no protocol exposes this without a Shell extension.
-- **Windows**: window detection via Win32 (`GetForegroundWindow`/`EnumWindows`) — works on any window manager.
 - Runs in the system tray; closing the window hides it instead of quitting.
 - Optional autostart on login (Linux: XDG autostart entry; Windows: `HKCU...\Run`).
+
+## Supported OS / desktop
+
+| OS / desktop | Mechanism | Status |
+| --- | --- | --- |
+| Windows | `SetWinEventHook(EVENT_SYSTEM_FOREGROUND)` | ✅ Tested |
+| Hyprland | `wlr-foreign-toplevel-management-unstable-v1` | ✅ Tested |
+| KDE Plasma (Wayland) | `plasma-window-management` (KWin) | ✅ Tested |
+| COSMIC | `cosmic-toplevel-info-unstable-v1` + `ext-foreign-toplevel-list-v1` | ✅ Tested |
+| Sway, River | `wlr-foreign-toplevel-management-unstable-v1` (same as Hyprland) | ⚠️ Should work, not tested |
+| X11 — i3, XFCE, MATE, KDE/GNOME in an X11 session, etc. | `_NET_ACTIVE_WINDOW`/EWMH | ⚠️ Should work, not tested |
+| GNOME (Wayland/Mutter) | — | ❌ Not supported |
+
+**Why not GNOME:** Mutter deliberately doesn't implement
+`wlr-foreign-toplevel-management` (that's a wlroots-ecosystem protocol) or
+any other standard way for a client to ask "what's focused" — it's treated as
+a sandboxing/privacy boundary, by design, not an oversight. The only way in
+is a GNOME Shell extension (e.g. "Window Calls") exposing it over D-Bus,
+which the user would have to install separately — not wired up here.
 
 ## Firmware requirement
 
@@ -52,6 +73,6 @@ independent of the GUI:
 
 ## Status
 
-Early beta. Built for one specific keyboard (BCORNE) and one specific
-compositor (Hyprland) — the architecture is generic, but only that
-combination has been tested end-to-end so far.
+Early beta. Built for one specific keyboard (BCORNE). Window detection has
+been tested end-to-end on the desktops marked ✅ above; the rest of the
+architecture (rules, HID, tray, autostart) is shared and desktop-independent.
