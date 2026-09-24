@@ -25,6 +25,10 @@ pub struct AppConfig {
     /// is also enabled — a manual launch should always show the window.
     #[serde(default)]
     pub start_minimized: bool,
+    /// Keep the window above others. Not honored on Wayland - see
+    /// `always_on_top_supported` in main.rs.
+    #[serde(default)]
+    pub always_on_top: bool,
 }
 
 fn config_path() -> Option<PathBuf> {

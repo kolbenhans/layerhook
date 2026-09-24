@@ -126,6 +126,7 @@ struct App {
     default_layer: u8,
     autostart: bool,
     start_minimized: bool,
+    always_on_top: bool,
     new_pattern: String,
     new_layer: u8,
     window_titles: Vec<String>,
@@ -163,6 +164,7 @@ impl App {
             default_layer,
             autostart: autostart::is_enabled(),
             start_minimized: AppConfig::load().start_minimized,
+            always_on_top: AppConfig::load().always_on_top,
             new_pattern: String::new(),
             new_layer: 0,
             window_titles: window::list_window_titles(),
@@ -199,7 +201,7 @@ impl App {
             product_id: d.product_id,
             serial_number: d.serial_number.clone(),
         });
-        AppConfig { rules: self.rules.clone(), device, default_layer: self.default_layer, start_minimized: self.start_minimized }.save();
+        AppConfig { rules: self.rules.clone(), device, default_layer: self.default_layer, start_minimized: self.start_minimized, always_on_top: self.always_on_top }.save();
     }
 
     fn sync_shared(&self) {
@@ -289,6 +291,19 @@ impl eframe::App for App {
                             .changed()
                         {
                             autostart::set_enabled(self.autostart);
+                            self.persist();
+                        }
+
+                        let supported = always_on_top_supported();
+                        // Where it can't work, show it unchecked rather than
+                        // displaying a stored "on" that does nothing.
+                        let mut unsupported_off = false;
+                        let checked = if supported { &mut self.always_on_top } else { &mut unsupported_off };
+                        let pin = ui
+                            .add_enabled(supported, egui::Checkbox::new(checked, "Always on top"))
+                            .on_disabled_hover_text("Not available on Wayland - use your compositor's own pin / keep-above function for this window");
+                        if pin.changed() {
+                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::WindowLevel(window_level(self.always_on_top)));
                             self.persist();
                         }
                     },
@@ -726,6 +741,22 @@ impl eframe::App for App {
     }
 }
 
+/// Whether the window can be pinned above others. winit implements it on
+/// Windows and X11 (`_NET_WM_STATE_ABOVE`) but not on Wayland: there's no
+/// protocol for a normal app window to ask for it, only the compositor's own
+/// keep-above/pin function can do that.
+fn always_on_top_supported() -> bool {
+    !cfg!(target_os = "linux") || std::env::var_os("WAYLAND_DISPLAY").is_none()
+}
+
+fn window_level(always_on_top: bool) -> egui::WindowLevel {
+    if always_on_top {
+        egui::WindowLevel::AlwaysOnTop
+    } else {
+        egui::WindowLevel::Normal
+    }
+}
+
 fn app_icon() -> egui::IconData {
     let icon = image::load_from_memory(include_bytes!("../resources/icon-256.png")).expect("failed to load app icon").into_rgba8();
     let (width, height) = icon.dimensions();
@@ -792,8 +823,11 @@ fn main() {
             *requested = false;
         }
 
+        // Re-read from disk: the GUI persists changes, so the copy loaded at
+        // startup goes stale once the setting has been toggled.
+        let always_on_top = always_on_top_supported() && AppConfig::load().always_on_top;
         let options = eframe::NativeOptions {
-            viewport: egui::ViewportBuilder::default().with_inner_size([840.0, 720.0]).with_icon(icon.clone()),
+            viewport: egui::ViewportBuilder::default().with_inner_size([840.0, 720.0]).with_icon(icon.clone()).with_window_level(window_level(always_on_top)),
             ..Default::default()
         };
         let shared = shared.clone();
