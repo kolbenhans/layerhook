@@ -1,6 +1,6 @@
 [package]
 name = "layerhook"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 license = "GPL-3.0-only"
 description = "Switches a QMK/Vial keyboard's active layer based on the focused window's title."
