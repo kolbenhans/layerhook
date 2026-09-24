@@ -16,6 +16,9 @@ layer. A periodic recheck every 500ms still runs alongside this purely as a
 retry (e.g. the keyboard was briefly unplugged) — it doesn't drive normal
 layer switching, which reacts immediately.
 
+- **What a rule matches against:** on Linux, the window title. On Windows, `[exe.exe]:window title` (same format as OBS's window picker), e.g. `[Photoshop.exe]:Untitled-1 @ 50% (RGB/8)` — so `Photoshop\.exe` covers every window of the app, even panels with no title of their own. A title that can't be read shows as `(null)`, an unreadable exe as `(unknown)`.
+- Rules are checked top to bottom, first match wins — drag the `☰` handle to reorder.
+- Optional "Always on top" (Windows and X11 only — Wayland has no protocol for it; use your compositor's pin/keep-above function there).
 - Runs in the system tray; closing the window hides it instead of quitting.
 - Optional autostart on login (Linux: XDG autostart entry; Windows: `HKCU...\Run`).
 
