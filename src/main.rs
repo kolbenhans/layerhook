@@ -14,6 +14,7 @@ const LAYER_COUNT: u8 = 10;
 const PATTERN_FIELD_WIDTH: f32 = 440.0;
 const LAYER_COMBO_WIDTH: f32 = 110.0;
 const ROW_BUTTON_WIDTH: f32 = 80.0;
+const DRAG_HANDLE_WIDTH: f32 = 22.0;
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 // Separate from POLL_INTERVAL on purpose: this only governs how often the idle
 // GUI redraws itself (each redraw forces an OpenGL buffer swap even when
@@ -482,6 +483,8 @@ impl eframe::App for App {
                 ui.add_space(10.0);
 
                 let mut removed: Option<usize> = None;
+                // (from, insert_before) in pre-move indices, set by a drop.
+                let mut moved: Option<(usize, usize)> = None;
                 let mut changed = false;
 
                 if self.rules.is_empty() {
@@ -505,6 +508,9 @@ impl eframe::App for App {
                 } else {
                     // Column labels
                     ui.horizontal(|ui| {
+                        // Same width as each row's drag handle, so the
+                        // column labels stay lined up with their fields.
+                        ui.add_sized([DRAG_HANDLE_WIDTH, 18.0], egui::Label::new(""));
                         ui.add_sized([PATTERN_FIELD_WIDTH, 18.0], egui::Label::new(weak("Pattern", 11.0)));
                         ui.add_sized([LAYER_COMBO_WIDTH, 18.0], egui::Label::new(weak("Layer", 11.0)));
                         ui.add_space(8.0);
@@ -516,10 +522,11 @@ impl eframe::App for App {
                     // Capped so a long rule list scrolls instead of pushing
                     // the Status section off the (fixed-height) window.
                     egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+                        let rule_count = self.rules.len();
                         for (i, rule) in self.rules.iter_mut().enumerate() {
                             let regex_error = fancy_regex::Regex::new(&format!("(?i){}", rule.pattern)).err();
 
-                            egui::Frame::new()
+                            let row = egui::Frame::new()
                                 .fill(if regex_error.is_some() {
                                     egui::Color32::from_rgb(64, 24, 24)
                                 } else {
@@ -528,6 +535,14 @@ impl eframe::App for App {
                                 .inner_margin(egui::Margin::symmetric(8, 5))
                                 .show(ui, |ui| {
                                     ui.horizontal(|ui| {
+                                        // Only the handle is the drag source, not
+                                        // the whole row - a drag-sensing rect over
+                                        // the row would shadow the text field,
+                                        // combo and button inside it.
+                                        ui.dnd_drag_source(egui::Id::new(("rule_drag", i)), i, |ui| {
+                                            ui.add_sized([DRAG_HANDLE_WIDTH, 28.0], egui::Label::new(weak("☰", 16.0)).selectable(false));
+                                        });
+
                                         let pattern_field = ui.add_sized(
                                             [PATTERN_FIELD_WIDTH, 28.0],
                                             egui::TextEdit::singleline(&mut rule.pattern),
@@ -549,15 +564,58 @@ impl eframe::App for App {
                                             removed = Some(i);
                                         }
                                     });
-                                });
+                                })
+                                .response;
+
+                            // Drop target: the row half the pointer is in decides
+                            // whether the dragged rule lands before or after this
+                            // one; a line shows where.
+                            if let (Some(pointer), Some(dragged)) = (ui.input(|i| i.pointer.interact_pos()), row.dnd_hover_payload::<usize>()) {
+                                let stroke = egui::Stroke::new(2.0, ui.visuals().selection.stroke.color);
+                                let insert_before = if *dragged == i || pointer.y < row.rect.center().y {
+                                    ui.painter().hline(row.rect.x_range(), row.rect.top(), stroke);
+                                    i
+                                } else {
+                                    ui.painter().hline(row.rect.x_range(), row.rect.bottom(), stroke);
+                                    i + 1
+                                };
+                                if let Some(from) = row.dnd_release_payload::<usize>() {
+                                    moved = Some((*from, insert_before));
+                                }
+                            }
 
                             ui.add_space(3.0);
+                        }
+
+                        // A list taller than the scroll area can't otherwise be
+                        // reordered across its hidden part: scroll while a drag
+                        // is held near the top/bottom edge.
+                        if rule_count > 0 && egui::DragAndDrop::has_payload_of_type::<usize>(ui.ctx()) {
+                            if let Some(pointer) = ui.ctx().pointer_interact_pos() {
+                                let visible = ui.clip_rect();
+                                let edge = 24.0;
+                                if pointer.y < visible.top() + edge {
+                                    ui.scroll_with_delta(egui::vec2(0.0, 10.0));
+                                    ui.ctx().request_repaint();
+                                } else if pointer.y > visible.bottom() - edge {
+                                    ui.scroll_with_delta(egui::vec2(0.0, -10.0));
+                                    ui.ctx().request_repaint();
+                                }
+                            }
                         }
                     });
                 }
 
                 if let Some(i) = removed {
                     self.rules.remove(i);
+                    changed = true;
+                } else if let Some((from, insert_before)) = moved {
+                    // `insert_before` indexes the list as it was before the
+                    // removal, so it shifts down by one if the rule came from
+                    // above it.
+                    let rule = self.rules.remove(from);
+                    let to = if from < insert_before { insert_before - 1 } else { insert_before };
+                    self.rules.insert(to, rule);
                     changed = true;
                 }
 
@@ -697,7 +755,7 @@ fn main() {
         }
 
         let options = eframe::NativeOptions {
-            viewport: egui::ViewportBuilder::default().with_inner_size([840.0, 620.0]).with_icon(icon.clone()),
+            viewport: egui::ViewportBuilder::default().with_inner_size([840.0, 720.0]).with_icon(icon.clone()),
             ..Default::default()
         };
         let shared = shared.clone();
