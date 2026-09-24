@@ -27,6 +27,18 @@ fn window_text(hwnd: HWND) -> Option<String> {
     Some(String::from_utf16_lossy(&buf[..copied as usize]))
 }
 
+// Display-only: which owner window's title (if any) got substituted for a
+// titleless focused window's own (empty) title - see window_text_via_owner()
+// below. None when the focused window had its own title directly. Never
+// used for rule matching, purely so the GUI status can show it happened;
+// hence a plain Mutex read/write rather than routing it through the title
+// channel that resolve_layer() actually matches against.
+static OWNER_NOTE: Mutex<Option<String>> = Mutex::new(None);
+
+pub fn owner_note() -> Option<String> {
+    OWNER_NOTE.lock().unwrap().clone()
+}
+
 // Tool palettes (e.g. Photoshop's brush panel) are their own top-level
 // window with no title text of their own - the app's main window (which
 // does have one) owns them. Without this, focusing such a panel reports "no
@@ -35,15 +47,18 @@ fn window_text(hwnd: HWND) -> Option<String> {
 // in any way the user would notice.
 fn window_text_via_owner(hwnd: HWND) -> Option<String> {
     if let Some(text) = window_text(hwnd) {
+        *OWNER_NOTE.lock().unwrap() = None;
         return Some(text);
     }
     let mut owner = hwnd;
     for _ in 0..8 {
         owner = unsafe { GetWindow(owner, GW_OWNER) }.ok()?;
         if let Some(text) = window_text(owner) {
+            *OWNER_NOTE.lock().unwrap() = Some(text.clone());
             return Some(text);
         }
     }
+    *OWNER_NOTE.lock().unwrap() = None;
     None
 }
 
@@ -81,6 +96,7 @@ unsafe extern "system" fn win_event_proc(_hook: HWINEVENTHOOK, event: u32, hwnd:
     if hwnd.is_invalid() {
         // Genuinely nothing focused - this is the one case that should
         // reset to the default layer.
+        *OWNER_NOTE.lock().unwrap() = None;
         let _ = sender.lock().unwrap().send(None);
         return;
     }

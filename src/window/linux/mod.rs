@@ -55,3 +55,10 @@ pub fn list_window_titles() -> Vec<String> {
     }
     x11::list_window_titles()
 }
+
+// Windows-only concept (a titleless focused window falling back to its
+// owner's title, e.g. a Photoshop panel) - none of the Linux protocols need
+// it, their toplevel handles always carry their own title.
+pub fn owner_note() -> Option<String> {
+    None
+}

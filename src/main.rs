@@ -604,6 +604,12 @@ impl eframe::App for App {
                 ui.horizontal(|ui| {
                     ui.label(weak("Active window:", 12.0));
                     ui.label(s.last_title.as_deref().unwrap_or("-"));
+                    // Windows only: the focused window itself had no title
+                    // (e.g. a Photoshop tool panel) and this is its owner
+                    // window's title instead - see window::owner_note().
+                    if let Some(owner) = window::owner_note() {
+                        ui.label(weak(&format!("(owner: {owner})"), 12.0));
+                    }
                 });
 
                 ui.horizontal(|ui| {
