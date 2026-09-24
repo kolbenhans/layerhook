@@ -15,6 +15,10 @@ const PATTERN_FIELD_WIDTH: f32 = 440.0;
 const LAYER_COMBO_WIDTH: f32 = 110.0;
 const ROW_BUTTON_WIDTH: f32 = 80.0;
 const DRAG_HANDLE_WIDTH: f32 = 22.0;
+// egui's Frame::central_panel inner margin, per side.
+const CENTRAL_PANEL_MARGIN: f32 = 8.0;
+const MIN_WINDOW_WIDTH: f32 = 640.0;
+const MAX_WINDOW_WIDTH: f32 = 4000.0;
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 // Separate from POLL_INTERVAL on purpose: this only governs how often the idle
 // GUI redraws itself (each redraw forces an OpenGL buffer swap even when
@@ -127,6 +131,10 @@ struct App {
     window_titles: Vec<String>,
     shared: Arc<Mutex<Shared>>,
     icon_texture: egui::TextureHandle,
+    // Last window height we requested to fit the content, so a resize is
+    // only sent when the content actually changes (not every frame, which
+    // would fight a manual resize).
+    fitted_height: f32,
 }
 
 impl App {
@@ -160,6 +168,28 @@ impl App {
             window_titles: window::list_window_titles(),
             shared,
             icon_texture: load_icon_texture(ctx),
+            fitted_height: 0.0,
+        }
+    }
+
+    /// Resizes the window to `desired` height when the content's height
+    /// changed (rules added/removed, hint text appearing, ...). Width is left
+    /// as the user has it.
+    fn fit_window_height(&mut self, ctx: &egui::Context, mut desired: f32) {
+        if let Some(monitor) = ctx.input(|i| i.viewport().monitor_size) {
+            desired = desired.min(monitor.y - 80.0);
+        }
+        if (desired - self.fitted_height).abs() > 1.0 {
+            self.fitted_height = desired;
+            let width = ctx.input(|i| i.viewport().inner_rect).map_or(840.0, |r| r.width());
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(width, desired)));
+            // Hyprland (and Wayland compositors generally) ignore a client's
+            // resize request for an existing window - but they do honor the
+            // xdg_toplevel min/max size hints, so pinning both to the wanted
+            // height is what actually makes the window that tall. Width stays
+            // freely resizable.
+            ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(MIN_WINDOW_WIDTH, desired)));
+            ctx.send_viewport_cmd(egui::ViewportCommand::MaxInnerSize(egui::vec2(MAX_WINDOW_WIDTH, desired)));
         }
     }
 
@@ -225,7 +255,7 @@ impl eframe::App for App {
             ui.add_space(8.0);
         };
 
-        egui::CentralPanel::default().show(ui, |ui| {
+        let content = egui::CentralPanel::default().show(ui, |ui| {
             ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
 
             // ─────────────────────────────────────────────────────────────
@@ -521,7 +551,7 @@ impl eframe::App for App {
 
                     // Capped so a long rule list scrolls instead of pushing
                     // the Status section off the (fixed-height) window.
-                    egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+                    egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
                         let rule_count = self.rules.len();
                         for (i, rule) in self.rules.iter_mut().enumerate() {
                             let regex_error = fancy_regex::Regex::new(&format!("(?i){}", rule.pattern)).err();
@@ -632,8 +662,9 @@ impl eframe::App for App {
             // ─────────────────────────────────────────────────────────────
 
             let s = self.shared.lock().unwrap();
+            let content_top = ui.max_rect().top();
 
-            egui::Frame::group(ui.style()).show(ui, |ui| {
+            let status_frame = egui::Frame::group(ui.style()).show(ui, |ui| {
                 ui.set_width(ui.available_width());
 
                 ui.horizontal(|ui| {
@@ -684,7 +715,14 @@ impl eframe::App for App {
                     );
                 }
             });
+
+            // The Status frame is the last thing in the panel, so its bottom
+            // edge is the content's height. (ui.min_rect() isn't usable: the
+            // header's right-to-left layout claims the panel's full height.)
+            status_frame.response.rect.bottom() - content_top
         });
+
+        self.fit_window_height(ui.ctx(), content.inner + 2.0 * CENTRAL_PANEL_MARGIN);
     }
 }
 
