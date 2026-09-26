@@ -104,26 +104,33 @@ unsafe extern "system" fn top_window_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
     BOOL(1)
 }
 
-// ponytail: after Alt+Tab the switcher can keep foreground with no further event; then take the Z-order top
-// (EnumWindows is top-first; ignores cloaked windows on other desktops, add DWMWA_CLOAKED check if that bites).
-fn effective_foreground() -> HWND {
-    let fg = unsafe { GetForegroundWindow() };
-    if fg.is_invalid() || !is_switcher(fg) {
-        return fg;
+// ponytail: the switcher itself can become foreground mid Alt+Tab, with no
+// further event once it's released; take the Z-order top instead (EnumWindows
+// is top-first; ignores cloaked windows on other desktops, add DWMWA_CLOAKED
+// check if that bites).
+fn resolve_switcher(hwnd: HWND) -> HWND {
+    if hwnd.is_invalid() || !is_switcher(hwnd) {
+        return hwnd;
     }
     let mut top: Option<HWND> = None;
     unsafe {
         let _ = EnumWindows(Some(top_window_proc), LPARAM(std::ptr::addr_of_mut!(top) as isize));
     }
-    top.unwrap_or(fg)
+    top.unwrap_or(hwnd)
+}
+
+fn effective_foreground() -> HWND {
+    resolve_switcher(unsafe { GetForegroundWindow() })
 }
 
 static SENDER: OnceLock<Mutex<Sender<Option<String>>>> = OnceLock::new();
 
 unsafe extern "system" fn win_event_proc(_hook: HWINEVENTHOOK, event: u32, hwnd: HWND, _id_object: i32, _id_child: i32, _thread: u32, _time: u32) {
     // ponytail: Alt+Tab may end without a FOREGROUND event for the target window; SWITCHEND re-reads it.
+    // The switcher itself can also fire its own FOREGROUND event while Alt is held, so that path needs the
+    // same switcher-to-Z-order-top resolution, not just a straight pass-through.
     let hwnd = match event {
-        EVENT_SYSTEM_FOREGROUND => hwnd,
+        EVENT_SYSTEM_FOREGROUND => resolve_switcher(hwnd),
         EVENT_SYSTEM_SWITCHEND => effective_foreground(),
         _ => return,
     };
