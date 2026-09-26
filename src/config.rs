@@ -18,15 +18,13 @@ pub struct DeviceRef {
 pub struct AppConfig {
     pub rules: Vec<Rule>,
     pub device: Option<DeviceRef>,
-    /// Layer to fall back to when the focused window matches no rule.
+
     #[serde(default)]
     pub default_layer: u8,
-    /// Skip showing the main window on launch. Only applied when autostart
-    /// is also enabled — a manual launch should always show the window.
+
     #[serde(default)]
     pub start_minimized: bool,
-    /// Keep the window above others. Not honored on Wayland - see
-    /// `always_on_top_supported` in main.rs.
+
     #[serde(default)]
     pub always_on_top: bool,
 }

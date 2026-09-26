@@ -1,5 +1,3 @@
-// Visual check: cycles through a range of layers with a pause on each, so
-// the key_colors RGB per-layer table can be eyeballed on real hardware.
 use layerhook::hid;
 use qmk_via_api::scan::scan_keyboards;
 use std::thread::sleep;

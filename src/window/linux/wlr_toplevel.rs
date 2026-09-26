@@ -1,8 +1,3 @@
-//! Wayland `wlr-foreign-toplevel-management-unstable-v1` backend. Push-based:
-//! Hyprland, Sway, River (and likely COSMIC's `cosmic-comp`, unverified)
-//! advertise this protocol. GNOME (Mutter) and KDE (KWin) don't -
-//! `watch()`/`list_window_titles()` fail cleanly there, caller falls back.
-
 use std::collections::HashMap;
 use std::sync::mpsc::Sender;
 
@@ -22,8 +17,6 @@ struct Toplevel {
 
 struct State {
     toplevels: HashMap<ZwlrForeignToplevelHandleV1, Toplevel>,
-    // None for the one-off list_window_titles() snapshot, which doesn't need
-    // to push anything.
     tx: Option<Sender<Option<String>>>,
     last_sent: Option<String>,
 }
@@ -54,9 +47,6 @@ impl Dispatch<ZwlrForeignToplevelManagerV1, ()> for State {
         }
     }
 
-    // The `toplevel` event (opcode 0) carries a `new_id` - wayland-client
-    // needs to know the child object's user-data type before it can even
-    // parse the event, hence this instead of just handling it in `event()`.
     fn event_created_child(opcode: u16, qhandle: &QueueHandle<Self>) -> std::sync::Arc<dyn wayland_client::backend::ObjectData> {
         match opcode {
             0 => qhandle.make_data::<ZwlrForeignToplevelHandleV1, ()>(()),
@@ -86,8 +76,6 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for State {
     }
 }
 
-/// Spawns the watcher thread if the compositor advertises the protocol.
-/// Returns false (does nothing) if it doesn't - caller decides the fallback.
 pub fn watch(tx: Sender<Option<String>>) -> bool {
     let Ok(conn) = Connection::connect_to_env() else { return false };
     let Ok((globals, mut event_queue)) = registry_queue_init::<State>(&conn) else { return false };
@@ -103,8 +91,6 @@ pub fn watch(tx: Sender<Option<String>>) -> bool {
     true
 }
 
-/// One-off snapshot for the "pick from open window" dropdown. None if the
-/// compositor doesn't support this protocol.
 pub fn list_window_titles() -> Option<Vec<String>> {
     let conn = Connection::connect_to_env().ok()?;
     let (globals, mut event_queue) = registry_queue_init::<State>(&conn).ok()?;
@@ -112,8 +98,7 @@ pub fn list_window_titles() -> Option<Vec<String>> {
     globals.bind::<ZwlrForeignToplevelManagerV1, _, _>(&qh, 1..=3, ()).ok()?;
 
     let mut state = State { toplevels: HashMap::new(), tx: None, last_sent: None };
-    // First roundtrip: the manager's `toplevel` events arrive, creating
-    // handles. Second: each handle's initial title/state/done arrive.
+
     event_queue.roundtrip(&mut state).ok()?;
     event_queue.roundtrip(&mut state).ok()?;
 

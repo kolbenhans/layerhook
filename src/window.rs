@@ -1,7 +1,3 @@
-//! Active window title tracking, per platform. `watch()` is push-based
-//! (spawns whatever the platform needs, sends a title update whenever focus
-//! changes) rather than polled - see the platform modules for why.
-
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "windows")]

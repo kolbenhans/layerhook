@@ -1,10 +1,3 @@
-//! KDE Plasma backend via the `org_kde_plasma_window_management` Wayland
-//! protocol (KWin-specific, not a de facto cross-compositor standard like
-//! wlr-foreign-toplevel-management - Hyprland/Sway/River are tried first and
-//! don't advertise this one). Push-based, same shape as [`super::wlr_toplevel`].
-//!
-//! Verified live against a real KWin session (protocol v20).
-
 use std::collections::HashMap;
 use std::sync::mpsc::Sender;
 
@@ -52,13 +45,6 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for State {
 impl Dispatch<OrgKdePlasmaWindowManagement, ()> for State {
     fn event(state: &mut Self, mgr: &OrgKdePlasmaWindowManagement, event: org_kde_plasma_window_management::Event, _: &(), _: &Connection, qh: &QueueHandle<Self>) {
         use org_kde_plasma_window_management::Event;
-        // Neither event carries a new_id - get_window()/get_window_by_uuid()
-        // are separate requests that actually create the proxy.
-        //
-        // `window` is the legacy (pre-v13) id-based variant; current KWin
-        // (verified live against v20) only ever sends `window_with_uuid`
-        // and never sends `window` at all, so both are handled - the id
-        // path for older servers, uuid for anything since v13.
         match event {
             Event::Window { id } => {
                 let handle = mgr.get_window(id, qh, ());
@@ -98,8 +84,6 @@ fn bind_manager(qh: &QueueHandle<State>, globals: &wayland_client::globals::Glob
     globals.bind::<OrgKdePlasmaWindowManagement, _, _>(qh, 1..=18, ()).ok()
 }
 
-/// Spawns the watcher thread if KWin advertises this protocol. Returns false
-/// (does nothing) otherwise - caller decides the fallback.
 pub fn watch(tx: Sender<Option<String>>) -> bool {
     let Ok(conn) = Connection::connect_to_env() else { return false };
     let Ok((globals, mut event_queue)) = registry_queue_init::<State>(&conn) else { return false };
@@ -113,8 +97,6 @@ pub fn watch(tx: Sender<Option<String>>) -> bool {
     true
 }
 
-/// One-off snapshot for the "pick from open window" dropdown. None if KWin
-/// doesn't support this protocol.
 pub fn list_window_titles() -> Option<Vec<String>> {
     let conn = Connection::connect_to_env().ok()?;
     let (globals, mut event_queue) = registry_queue_init::<State>(&conn).ok()?;
@@ -122,8 +104,7 @@ pub fn list_window_titles() -> Option<Vec<String>> {
     let _manager = bind_manager(&qh, &globals)?;
 
     let mut state = State { windows: HashMap::new(), tx: None, last_sent: None };
-    // First roundtrip: `window(id)` events arrive, get_window() requests for
-    // each go out. Second: each window's initial title/state events arrive.
+
     event_queue.roundtrip(&mut state).ok()?;
     event_queue.roundtrip(&mut state).ok()?;
 

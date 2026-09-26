@@ -1,6 +1,3 @@
-// Standalone diagnostic for the BCORNE raw HID layer interface (0xB0/0xB1) -
-// not part of the layerhook GUI. Run manually after flashing new firmware to
-// confirm the keyboard actually responds before wiring up the full app.
 use layerhook::hid;
 use qmk_via_api::scan::scan_keyboards;
 

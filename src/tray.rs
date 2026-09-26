@@ -1,5 +1,3 @@
-// Same crate/pattern as keypeek's tray.rs, simplified: one icon (no
-// light/dark theme variants), no macOS support, two menu items.
 use image::load_from_memory;
 use std::process;
 use std::sync::Arc;
@@ -9,18 +7,6 @@ use tray_icon::{
     Icon, TrayIcon, TrayIconBuilder,
 };
 
-/// Keeps the tray icon alive for the lifetime of the app.
-///
-/// On Linux the icon lives on a dedicated GTK thread: libappindicator
-/// registers the StatusNotifierItem over DBus via the glib main loop, so the
-/// tray only works if `gtk::main()` runs on the thread that created it.
-///
-/// On Windows the icon similarly needs a Win32 message loop pumping on the
-/// thread that created its hidden host window — otherwise clicks on the icon
-/// (and the popup menu, which needs TrackPopupMenu) are never delivered.
-/// eframe/winit only pumps messages while the main window is open, so
-/// building the icon on a dedicated thread with its own GetMessage loop
-/// keeps it responsive even while the window is closed.
 pub struct Tray {
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     _icon: TrayIcon,
@@ -65,7 +51,6 @@ pub fn create_tray_icon(on_show: Arc<dyn Fn() + Send + Sync>) -> Tray {
         }
     });
 
-    // Left-clicking the icon shows the window, as is conventional on Windows.
     #[cfg(target_os = "windows")]
     thread::spawn(move || {
         use tray_icon::{MouseButton, MouseButtonState, TrayIconEvent};
@@ -99,9 +84,6 @@ pub fn create_tray_icon(on_show: Arc<dyn Fn() + Send + Sync>) -> Tray {
     Tray { _icon: build_tray_icon() }
 }
 
-/// Blocks, dispatching Win32 messages for windows created on this thread —
-/// including tray-icon's hidden host window — until a WM_QUIT is posted
-/// (which never happens here, so this runs for the life of the thread).
 #[cfg(target_os = "windows")]
 fn pump_windows_messages() {
     use windows::Win32::UI::WindowsAndMessaging::{DispatchMessageW, GetMessageW, TranslateMessage, MSG};

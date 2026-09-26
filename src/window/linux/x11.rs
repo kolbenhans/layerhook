@@ -1,7 +1,3 @@
-//! X11 backend via EWMH (`_NET_ACTIVE_WINDOW`), push-based through
-//! `PropertyNotify`. Covers i3, XFCE, MATE, and KDE/GNOME X11 sessions -
-//! effectively any EWMH-compliant window manager.
-
 use std::sync::mpsc::Sender;
 
 use x11rb::connection::Connection;
@@ -26,7 +22,6 @@ fn intern_atoms(conn: &impl Connection) -> Option<Atoms> {
 }
 
 fn window_title(conn: &impl Connection, atoms: &Atoms, win: Window) -> Option<String> {
-    // Prefer the UTF-8 EWMH name, fall back to the legacy WM_NAME (Latin-1).
     if let Ok(reply) = conn.get_property(false, win, atoms.net_wm_name, atoms.utf8_string, 0, u32::MAX).ok()?.reply() {
         if !reply.value.is_empty() {
             return String::from_utf8(reply.value).ok();
@@ -70,7 +65,6 @@ pub fn watch(tx: Sender<Option<String>>) {
             }
         };
 
-        // Pick up whatever's already focused at startup.
         if let Some(win) = active_window(&conn, &atoms, root) {
             current_win = Some(win);
             let _ = conn.change_window_attributes(win, &watch_props);
@@ -85,8 +79,6 @@ pub fn watch(tx: Sender<Option<String>>) {
                 if win != current_win {
                     current_win = win;
                     if let Some(w) = win {
-                        // Also watch this window's own title changes (e.g. a
-                        // browser tab switch) while it stays focused.
                         let _ = conn.change_window_attributes(w, &watch_props);
                         let _ = conn.flush();
                     }

@@ -1,8 +1,3 @@
-//! Launch layerhook automatically on login. Linux: an XDG autostart
-//! `.desktop` file. Windows: a value under the per-user `Run` registry key.
-//! Both just point at the current executable's own path — no separate
-//! installer/shortcut needed.
-
 #[cfg(target_os = "linux")]
 fn desktop_file_path() -> Option<std::path::PathBuf> {
     let dirs = directories::BaseDirs::new()?;
@@ -14,11 +9,6 @@ pub fn is_enabled() -> bool {
     desktop_file_path().is_some_and(|p| p.exists())
 }
 
-// Running as an AppImage, `current_exe()` resolves to the FUSE mount's
-// ephemeral, randomly-named path (e.g. /tmp/.mount_layerhXXXXX/...) — gone
-// as soon as the process exits, useless in a persisted autostart entry. The
-// AppImage runtime sets $APPIMAGE to the stable path of the .AppImage file
-// itself for exactly this case; prefer that when present.
 #[cfg(target_os = "linux")]
 fn exe_path_for_autostart() -> Option<std::path::PathBuf> {
     std::env::var_os("APPIMAGE").map(std::path::PathBuf::from).or_else(|| std::env::current_exe().ok())
