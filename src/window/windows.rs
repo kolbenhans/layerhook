@@ -1,8 +1,3 @@
-//! Windows backend via `SetWinEventHook(EVENT_SYSTEM_FOREGROUND, ...)` -
-//! push-based, fires the moment the foreground window changes. Needs a
-//! dedicated thread pumping Win32 messages for the hook to actually deliver
-//! events (same pattern as the tray icon's hidden host window, see tray.rs).
-
 use std::sync::mpsc::Sender;
 use std::sync::{Mutex, OnceLock};
 
@@ -11,8 +6,8 @@ use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM};
 use windows::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION};
 use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, EnumWindows, GetForegroundWindow, GetMessageW, GetWindow, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, TranslateMessage,
-    EVENT_SYSTEM_FOREGROUND, GW_OWNER, MSG, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
+    DispatchMessageW, EnumWindows, GetClassNameW, GetForegroundWindow, GetMessageW, GetWindow, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, TranslateMessage,
+    EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_SWITCHEND, GW_OWNER, MSG, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
 };
 
 fn window_text(hwnd: HWND) -> Option<String> {
@@ -28,24 +23,12 @@ fn window_text(hwnd: HWND) -> Option<String> {
     Some(String::from_utf16_lossy(&buf[..copied as usize]))
 }
 
-// Display-only: which owner window's title (if any) got substituted for a
-// titleless focused window's own (empty) title - see window_text_via_owner()
-// below. None when the focused window had its own title directly. Never
-// used for rule matching, purely so the GUI status can show it happened;
-// hence a plain Mutex read/write rather than routing it through the title
-// channel that resolve_layer() actually matches against.
 static OWNER_NOTE: Mutex<Option<String>> = Mutex::new(None);
 
 pub fn owner_note() -> Option<String> {
     OWNER_NOTE.lock().unwrap().clone()
 }
 
-// Tool palettes (e.g. Photoshop's brush panel) are their own top-level
-// window with no title text of their own - the app's main window (which
-// does have one) owns them. This alone is no longer load-bearing for rule
-// matching (window_label() below adds the exe name, which every window has
-// regardless of title), but it still gives a more useful title than "(null)"
-// when one's available.
 fn window_text_via_owner(hwnd: HWND) -> Option<String> {
     if let Some(text) = window_text(hwnd) {
         *OWNER_NOTE.lock().unwrap() = None;
@@ -63,11 +46,6 @@ fn window_text_via_owner(hwnd: HWND) -> Option<String> {
     None
 }
 
-// The exe name alone (e.g. "Photoshop.exe") - stable regardless of which of
-// an app's windows has focus, unlike the title (which for something like
-// Photoshop's document window changes with zoom/color mode/filename, and is
-// flat-out empty for tool palettes). Same idea OBS's window picker uses for
-// its "[exe]: title" display.
 fn process_exe_name(hwnd: HWND) -> Option<String> {
     let mut pid = 0u32;
     unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
@@ -84,12 +62,6 @@ fn process_exe_name(hwnd: HWND) -> Option<String> {
     path.rsplit(['\\', '/']).next().map(str::to_string)
 }
 
-// What actually gets matched against (and shown as) the active window:
-// "[exe.exe]:window title", same format as OBS's window picker. The exe name
-// makes an app identifiable by a simple rule regardless of which of its
-// windows has focus - title alone forced increasingly complex regexes for
-// apps like Photoshop, whose document window title changes constantly
-// (zoom/color mode/filename) and whose tool palettes have no title at all.
 fn window_label(hwnd: HWND) -> String {
     let exe = process_exe_name(hwnd).unwrap_or_else(|| "(unknown)".to_string());
     let title = window_text_via_owner(hwnd).unwrap_or_else(|| "(null)".to_string());
@@ -117,19 +89,46 @@ pub fn list_window_titles() -> Vec<String> {
     titles
 }
 
-// Only one watcher is ever started (once, at app startup) - a static is
-// simpler than threading a channel through the WINEVENTPROC's fixed C
-// callback signature, which can't capture a closure.
+fn is_switcher(hwnd: HWND) -> bool {
+    let mut buf = [0u16; 64];
+    let n = unsafe { GetClassNameW(hwnd, &mut buf) } as usize;
+    matches!(String::from_utf16_lossy(&buf[..n]).as_str(), "XamlExplorerHostIslandWindow" | "MultitaskingViewFrame" | "TaskSwitcherWnd")
+}
+
+unsafe extern "system" fn top_window_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let out = unsafe { &mut *(lparam.0 as *mut Option<HWND>) };
+    if unsafe { IsWindowVisible(hwnd) }.as_bool() && window_text(hwnd).is_some() && !is_switcher(hwnd) {
+        *out = Some(hwnd);
+        return BOOL(0);
+    }
+    BOOL(1)
+}
+
+// ponytail: after Alt+Tab the switcher can keep foreground with no further event; then take the Z-order top
+// (EnumWindows is top-first; ignores cloaked windows on other desktops, add DWMWA_CLOAKED check if that bites).
+fn effective_foreground() -> HWND {
+    let fg = unsafe { GetForegroundWindow() };
+    if fg.is_invalid() || !is_switcher(fg) {
+        return fg;
+    }
+    let mut top: Option<HWND> = None;
+    unsafe {
+        let _ = EnumWindows(Some(top_window_proc), LPARAM(std::ptr::addr_of_mut!(top) as isize));
+    }
+    top.unwrap_or(fg)
+}
+
 static SENDER: OnceLock<Mutex<Sender<Option<String>>>> = OnceLock::new();
 
 unsafe extern "system" fn win_event_proc(_hook: HWINEVENTHOOK, event: u32, hwnd: HWND, _id_object: i32, _id_child: i32, _thread: u32, _time: u32) {
-    if event != EVENT_SYSTEM_FOREGROUND {
-        return;
-    }
+    // ponytail: Alt+Tab may end without a FOREGROUND event for the target window; SWITCHEND re-reads it.
+    let hwnd = match event {
+        EVENT_SYSTEM_FOREGROUND => hwnd,
+        EVENT_SYSTEM_SWITCHEND => effective_foreground(),
+        _ => return,
+    };
     let Some(sender) = SENDER.get() else { return };
     if hwnd.is_invalid() {
-        // Genuinely nothing focused - this is the one case that resets to
-        // the default layer.
         *OWNER_NOTE.lock().unwrap() = None;
         let _ = sender.lock().unwrap().send(None);
         return;
@@ -140,19 +139,25 @@ unsafe extern "system" fn win_event_proc(_hook: HWINEVENTHOOK, event: u32, hwnd:
 pub fn watch(tx: Sender<Option<String>>) {
     let _ = SENDER.set(Mutex::new(tx));
     std::thread::spawn(|| unsafe {
-        let hook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, None, Some(win_event_proc), 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+        let hook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_SWITCHEND, None, Some(win_event_proc), 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
         if hook.is_invalid() {
             return;
         }
 
-        // Seed with whatever's focused right now - the hook only fires on
-        // the *next* change.
         let fg = GetForegroundWindow();
         if let Some(sender) = SENDER.get() {
             let _ = sender.lock().unwrap().send(if fg.is_invalid() { None } else { Some(window_label(fg)) });
         }
 
-        // The hook only delivers events while this thread pumps messages.
+        // Backstop: the hook alone misses the end of Alt+Tab; main dedupes by layer so repeats are free.
+        std::thread::spawn(|| loop {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let fg = effective_foreground();
+            if let Some(sender) = SENDER.get() {
+                let _ = sender.lock().unwrap().send(if fg.is_invalid() { None } else { Some(window_label(fg)) });
+            }
+        });
+
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
             let _ = TranslateMessage(&msg);
